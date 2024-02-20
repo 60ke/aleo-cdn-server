@@ -1,0 +1,16 @@
+[package]
+name = "server"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+snarkos-node-cdn = "2.2.7"
+snarkvm = "0.16.15"
+parking_lot = "0.12"
+tokio ={ version = "1.28", features = ["rt"] }
+anyhow = "1.0.75"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+colored = "2.0"
