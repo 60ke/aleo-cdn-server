@@ -1,25 +1,33 @@
+use anyhow::{bail, Result};
+use env_logger::Env;
+use log::*;
+use num_cpus;
+use redis::AsyncCommands;
+use snarkvm::prelude::{Deserialize, Serialize};
 use {
-    colored::*, parking_lot::RwLock, snarkos_node_cdn::load_blocks, snarkvm::{prelude::{block::Block, transactions::Transactions, Testnet3}, utilities::ToBytes}, 
-    std::{
-        error::Error, sync::Arc, time::Instant
-    }, tokio::task,
     bytes::BytesMut,
+    colored::*,
+    parking_lot::RwLock,
+    snarkos_node_cdn::load_blocks,
+    snarkvm::{
+        prelude::{block::Block, Testnet3},
+        utilities::ToBytes,
+    },
+    std::{error::Error, sync::Arc, time::Instant},
+    tokio::task,
 };
-use anyhow::{anyhow, bail, Result};
-use snarkvm::prelude::{
-    store::{cow_to_copied, ConsensusStorage},
-    Deserialize,
-    DeserializeOwned,
-    Ledger,
-    Network,
-    Serialize,
-};
+use std::io::Write;
 
 
 
 const MAX_RETRIES: usize = 3; // 最大重试次数
 
-async fn load_blocks_range(base_url: &str, start_height: u32, end_height: u32, blocks: Arc<RwLock<Vec<Block<Testnet3>>>>) -> Result<(), Box<dyn Error>> {
+async fn load_blocks_range(
+    base_url: &str,
+    start_height: u32,
+    end_height: u32,
+    blocks: Arc<RwLock<Vec<Block<Testnet3>>>>,
+) -> Result<(), Box<dyn Error>> {
     for _ in 0..MAX_RETRIES {
         let blocks_clone = blocks.clone();
         let process = move |block: Block<Testnet3>| {
@@ -30,14 +38,10 @@ async fn load_blocks_range(base_url: &str, start_height: u32, end_height: u32, b
         if result.is_ok() {
             return Ok(());
         }
-        println!("Error loading blocks, retrying...");
+        info!("Error loading blocks, retrying...");
     }
     Err("Failed to load blocks after multiple retries".into())
 }
-
-
-
-
 
 async fn cdn_height<const BLOCKS_PER_FILE: u32>(base_url: &str) -> Result<u32> {
     // A representation of the 'latest.json' file object.
@@ -80,58 +84,98 @@ async fn cdn_height<const BLOCKS_PER_FILE: u32>(base_url: &str) -> Result<u32> {
     Ok(tip - (tip % BLOCKS_PER_FILE) + BLOCKS_PER_FILE)
 }
 
-
-
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        // 添加行号格式
+        .format(|buf, record| {
+            writeln!(
+                buf,
+                "[{}] [{}] [{}] [{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.level(),
+                record.module_path().unwrap_or("<unknown>"),
+                record.line().unwrap_or(0),
+                record.args()
+            )
+        })
+        // 初始化日志系统
+        .init();    
+    info!("Starting sync");
     let start = Instant::now();
     const TEST_BASE_URL: &str = "https://s3.us-west-1.amazonaws.com/testnet3.blocks/phase3";
     let height = cdn_height::<50>(TEST_BASE_URL).await.unwrap();
-    println!("Height: {}", height);
+    let mut redis_client = redis::Client::open("redis://127.0.0.1/")
+        .unwrap()
+        .get_async_connection()
+        .await?;
+    info!("Height: {}", height);
+    let height = 15000;
+    let start_sync: u32 = redis_client.get("start_block").await.unwrap_or(0);
+
     let blocks = Arc::new(RwLock::new(Vec::new()));
     let expected = 50;
-    let num_groups = 2;
-    let mut tasks = Vec::new();
-    let mut redis_client = redis::Client::open("redis://127.0.0.1/").unwrap().get_async_connection().await?;
+    let end_sync = height / expected;
+    let num_cores = num_cpus::get();
+    let mut ranges = Vec::new();
+    let mut total: usize = 0;
 
-    for i in 1..num_groups {
-        let start_height = i * expected;
-        let end_height = (i + 1) * expected;
-        let blocks_clone = blocks.clone();
-        let task = task::spawn(async move {
-            load_blocks_range(TEST_BASE_URL, start_height, end_height, blocks_clone).await.unwrap();
-        });
-        tasks.push(task);
-    }    
-    let mut total:usize = 0;
-    for task in tasks {
-        task.await?;
-        // let mut redis_conn = redis_client.
-
-        for block in blocks.read().iter() {
-            println!("Block height: {}", block.height());
-            use bytes::BufMut;
-            let mut bytes = BytesMut::default().writer();
-            let _ = block.write_le(&mut bytes);
-            let byte  = bytes.into_inner();
-            total += byte.len();
-            println!("Block size: {}", byte.len().to_string().green());
-            let mut redis_cmd = redis::cmd("SET");
-            let block_bytes = byte.freeze();
-            let bytes_slice: &[u8] = &block_bytes;
-            redis_cmd.arg(format!("block:{}", block.height())).arg(bytes_slice);
-            let _:() = redis_cmd.query_async(&mut redis_client).await?;            
-        }        
+    for i in (start_sync..end_sync).step_by(num_cores) {
+        let range_start = i;
+        let range_end = (i + num_cores as u32).min(end_sync);
+        ranges.push((range_start, range_end));
     }
 
-    println!("Blocks loaded in {} seconds", start.elapsed().as_secs().to_string().red());
-    println!("Loaded {} blocks", blocks.read().len().to_string().green());
+    for range in ranges.iter() {
+        info!("Range: {} - {}", range.0*50, range.1*50);
+        let range_start = range.0;
+        let range_end = range.1;
+        let mut tasks = Vec::new();
+        for i in range_start..range_end {
+            let start_height = i * expected;
+            let end_height = (i + 1) * expected;
+            let blocks_clone = blocks.clone();
+            let task = task::spawn(async move {
+                load_blocks_range(TEST_BASE_URL, start_height, end_height, blocks_clone)
+                    .await
+                    .unwrap();
+            });
+            tasks.push(task);
+        }
 
+        for task in tasks {
+            task.await?;
+            // let mut redis_conn = redis_client.
 
+            for block in blocks.read().iter() {
+                info!("Block height: {}", block.height());
+                use bytes::BufMut;
+                let mut bytes = BytesMut::default().writer();
+                let _ = block.write_le(&mut bytes);
+                let byte = bytes.into_inner();
+                total += byte.len();
+                info!("Block size: {}", byte.len().to_string().green());
+                let mut redis_cmd = redis::cmd("SET");
+                let block_bytes = byte.freeze();
+                let bytes_slice: &[u8] = &block_bytes;
+                redis_cmd
+                    .arg(format!("block:{}", block.height()))
+                    .arg(bytes_slice);
+                let _: () = redis_cmd.query_async(&mut redis_client).await?;
+            }
+        }
+        redis_client.set("start_block", range_end).await?;
+    }
 
-    println!("Elapsed: {} seconds", start.elapsed().as_secs());
-    println!("Total size: {}KB", (total/1024).to_string().green());
+    info!(
+        "Blocks loaded in {} seconds",
+        start.elapsed().as_secs().to_string().red()
+    );
+    info!("Loaded {} blocks", blocks.read().len().to_string().green());
+
+    info!("Elapsed: {} seconds", start.elapsed().as_secs());
+    info!("Total size: {}KB", (total / 1024).to_string().green());
+    info!("syncing complete end height {height}");
     Ok(())
-
 }
