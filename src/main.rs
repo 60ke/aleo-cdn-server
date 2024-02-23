@@ -114,12 +114,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let height = 15000;
     let start_sync: u32 = redis_client.get("start_block").await.unwrap_or(0);
 
-    let blocks = Arc::new(RwLock::new(Vec::new()));
+    // let blocks = Arc::new(RwLock::new(Vec::new()));
     let expected = 50;
     let end_sync = height / expected;
     let num_cores = num_cpus::get();
     let mut ranges = Vec::new();
     let mut total: usize = 0;
+    let mut block_count = 0;
 
     for i in (start_sync..end_sync).step_by(num_cores) {
         let range_start = i;
@@ -128,6 +129,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     for range in ranges.iter() {
+        let blocks = Arc::new(RwLock::new(Vec::new()));
         info!("Range: {} - {}", range.0*50, range.1*50);
         let range_start = range.0;
         let range_end = range.1;
@@ -155,6 +157,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = block.write_le(&mut bytes);
             let byte = bytes.into_inner();
             total += byte.len();
+            block_count += 1;
             // info!("Block size: {}", byte.len().to_string().green());
             let mut redis_cmd = redis::cmd("SET");
             let block_bytes = byte.freeze();
@@ -171,7 +174,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "Blocks loaded in {} seconds",
         start.elapsed().as_secs().to_string().red()
     );
-    info!("Loaded {} blocks", blocks.read().len().to_string().green());
+    info!("Loaded {} blocks", block_count.to_string().green());
 
     info!("Elapsed: {} seconds", start.elapsed().as_secs());
     info!("Total size: {}KB", (total / 1024).to_string().green());
