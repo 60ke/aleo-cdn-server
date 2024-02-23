@@ -110,8 +110,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .unwrap()
         .get_async_connection()
         .await?;
-    info!("Height: {}", height);
-    let height = 15000;
+    // info!("Height: {}", height);
+    // let height = 15000;
     let start_sync: u32 = redis_client.get("start_block").await.unwrap_or(0);
 
     let blocks = Arc::new(RwLock::new(Vec::new()));
@@ -147,24 +147,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         for task in tasks {
             task.await?;
             // let mut redis_conn = redis_client.
-
-            for block in blocks.read().iter() {
-                info!("Block height: {}", block.height());
-                use bytes::BufMut;
-                let mut bytes = BytesMut::default().writer();
-                let _ = block.write_le(&mut bytes);
-                let byte = bytes.into_inner();
-                total += byte.len();
-                info!("Block size: {}", byte.len().to_string().green());
-                let mut redis_cmd = redis::cmd("SET");
-                let block_bytes = byte.freeze();
-                let bytes_slice: &[u8] = &block_bytes;
-                redis_cmd
-                    .arg(format!("block:{}", block.height()))
-                    .arg(bytes_slice);
-                let _: () = redis_cmd.query_async(&mut redis_client).await?;
-            }
         }
+        for block in blocks.read().iter() {
+            // info!("Block height: {}", block.height());
+            use bytes::BufMut;
+            let mut bytes = BytesMut::default().writer();
+            let _ = block.write_le(&mut bytes);
+            let byte = bytes.into_inner();
+            total += byte.len();
+            // info!("Block size: {}", byte.len().to_string().green());
+            let mut redis_cmd = redis::cmd("SET");
+            let block_bytes = byte.freeze();
+            let bytes_slice: &[u8] = &block_bytes;
+            redis_cmd
+                .arg(format!("block:{}", block.height()))
+                .arg(bytes_slice);
+            let _: () = redis_cmd.query_async(&mut redis_client).await?;
+        }        
         redis_client.set("start_block", range_end).await?;
     }
 
